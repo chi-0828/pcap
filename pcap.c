@@ -11,6 +11,8 @@
 #include <netinet/tcp.h>
 #include <netinet/udp.h>
 #include <netinet/ip_icmp.h>
+#include <net/if_arp.h>
+#include <netinet/if_ether.h>
 #define MAC_ADDRSTRLEN 2*6+5+1
 #define NONE "\033[m"
 
@@ -331,6 +333,45 @@ void dump_icmp(struct icmp *icmp) {
     }//end if
     printf(NONE);
 }//end dump_icmp
+void dump_arp(u_int32_t length, const u_char *content) {
+    struct ether_arp *arp = (struct ether_arp *)(content + ETHER_HDR_LEN);
+    u_short hardware_type = ntohs(arp->ea_hdr.ar_hrd);
+    u_short protocol_type = ntohs(arp->ea_hdr.ar_pro);
+    u_char hardware_len = arp->ea_hdr.ar_hln;
+    u_char protocol_len = arp->ea_hdr.ar_pln;
+    u_short operation = ntohs(arp->ea_hdr.ar_op);
+
+    static char *arp_op_name[] = {
+        "Undefine",
+        "(ARP Request)",
+        "(ARP Reply)",
+        "(RARP Request)",
+        "(RARP Reply)"
+    }; //arp option type
+
+    if(operation < 0 || sizeof(arp_op_name)/sizeof(arp_op_name[0]) < operation)
+        operation = 0;
+
+    printf("Protocol: ARP\n");
+    printf("+-------------------------+-------------------------+\n");
+    printf("| Hard Type: %2u%-11s| Protocol:0x%04x%-9s|\n",
+           hardware_type,
+           (hardware_type == ARPHRD_ETHER) ? "(Ethernet)" : "(Not Ether)",
+           protocol_type,
+           (protocol_type == ETHERTYPE_IP) ? "(IP)" : "(Not IP)");
+    printf("+------------+------------+-------------------------+\n");
+    printf("| HardLen:%3u| Addr Len:%2u| OP: %4d%16s|\n",
+           hardware_len, protocol_len, operation, arp_op_name[operation]);
+    printf("+------------+------------+-------------------------+-------------------------+\n");
+    printf("| Source MAC Address:                                        %17s|\n", mac_ntoa(arp->arp_sha));
+    printf("+---------------------------------------------------+-------------------------+\n");
+    printf("| Source IP Address:                 %15s|\n", ip_ntoa(arp->arp_spa));
+    printf("+---------------------------------------------------+-------------------------+\n");
+    printf("| Destination MAC Address:                                   %17s|\n", mac_ntoa(arp->arp_tha));
+    printf("+---------------------------------------------------+-------------------------+\n");
+    printf("| Destination IP Address:            %15s|\n", ip_ntoa(arp->arp_tpa));
+    printf("+---------------------------------------------------+\n");
+}//end dump_arp
 
 void dump_ethernet(u_int32_t length, const u_char *content) {
     struct ether_header *ethernet = (struct ether_header *)content;
@@ -363,7 +404,7 @@ void dump_ethernet(u_int32_t length, const u_char *content) {
     
     switch (type) {
         case ETHERTYPE_ARP:
-            printf("Next is ARP\n");
+            dump_arp(length, content);
             break;
 
         case ETHERTYPE_IP:
@@ -441,7 +482,7 @@ int main(int argc , char** argv) {
     int n=0;
     int N=-1;
     while(1) {
-        cmd_opt = getopt(argc, argv, "N::n::fc");
+        cmd_opt = getopt(argc, argv, "O::N::n::fc");
 
         /* End condition always first */
         if (cmd_opt == -1) {
@@ -528,6 +569,117 @@ int main(int argc , char** argv) {
                 //free
                 pcap_close(handle);
                 break;
+            }
+            case 'O': {
+                if (optarg) {
+                    fprintf(stderr, "Try to capture #arg:%s\n", optarg);
+                    n = atoi(optarg);
+                }
+                else {
+                    n = 10;
+                }
+                char errbuf[PCAP_ERRBUF_SIZE];
+                pcap_t *handle = NULL;
+                bpf_u_int32 net, mask;
+                struct bpf_program fcode;
+                char * device = NULL;
+                pcap_if_t *div;
+                int ret = 0;
+
+                //get default interface name
+                ret = pcap_findalldevs(&div,errbuf);
+                if(ret == PCAP_ERROR) {
+                    fprintf(stderr, "pcap_findalldevs(): %s\n", errbuf);
+                    exit(1);
+                }//end if
+                device = div[0].name;
+                //show divice name
+                printf("device: %s\n", device);
+
+                //get IP info
+                bpf_u_int32 netp = 0, maskp = 0;
+                ret = pcap_lookupnet(device, &netp, &maskp, errbuf);
+                if(ret == -1)
+                {
+                    perror(errbuf);
+                    exit(-1);
+                }
+                //show info
+                struct in_addr ip_addr,MASK;
+                ip_addr.s_addr = netp;
+                MASK.s_addr = maskp;
+                if(l)
+                    printf("Net : %s\nMASK : %s\n",inet_ntoa(ip_addr) ,inet_ntoa(MASK));
+                handle = pcap_open_live(device, 65535, 1, 1, errbuf);
+                if(!handle) {
+                    fprintf(stderr, "pcap_open_live: %s\n", errbuf);
+                    exit(1);
+                }//end if
+
+                //ethernet only
+                if(pcap_datalink(handle) != DLT_EN10MB) {
+                    fprintf(stderr, "Sorry, Ethernet only.\n");
+                    pcap_close(handle);
+                    exit(1);
+                }//end if
+
+                printf("(1)arp (2)udp (3)tcp ?\n");
+                int a = 0;
+                scanf("%d",&a);
+                if(a == 1){
+                    printf("arp\n");
+                    //compile filter
+                    if(-1 == pcap_compile(handle, &fcode, "arp", 1, mask)) {
+                        fprintf(stderr, "pcap_compile: %s\n", pcap_geterr(handle));
+                        pcap_close(handle);
+                        exit(1);
+                    }//end if
+                }
+                else if(a == 2){
+                    printf("udp\n");
+                    if(-1 == pcap_compile(handle, &fcode, "udp", 1, mask)) {
+                        fprintf(stderr, "pcap_compile: %s\n", pcap_geterr(handle));
+                        pcap_close(handle);
+                        exit(1);
+                    }//end if
+                }
+                else{
+                    printf("tcp\n");
+                    if(-1 == pcap_compile(handle, &fcode, "tcp", 1, mask)) {
+                        fprintf(stderr, "pcap_compile: %s\n", pcap_geterr(handle));
+                        pcap_close(handle);
+                        exit(1);
+                    }//end if
+                }
+                //set filter
+                if(-1 == pcap_setfilter(handle, &fcode)) {
+                    fprintf(stderr, "pcap_pcap_setfilter: %s\n", pcap_geterr(handle));
+                    pcap_close(handle);
+                    exit(1);
+                }
+
+                //free code
+                pcap_freecode(&fcode);
+
+                printf("input your filename !");
+                char filename[100] = {'\0'};
+                scanf("%s",filename);
+                pcap_dumper_t *dumper = pcap_dump_open(handle, filename);
+                if(!dumper) {
+                    fprintf(stderr, "pcap_dump_open(): %s\n", pcap_geterr(handle));
+                    pcap_close(handle);
+                    exit(1);
+                }//end if
+                
+                printf("file : %sn", filename);
+                //start capture loop
+                if(0 != pcap_loop(handle, n, pcap_callback, (u_char *)dumper)) {
+                    fprintf(stderr, "pcap_loop(): %s\n", pcap_geterr(handle));
+                }//end if
+
+                //free
+                pcap_close(handle);
+                return 0;
             }
             case 'N':{
                 if (optarg) {
